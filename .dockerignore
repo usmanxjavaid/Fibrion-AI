@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+.env
+.env.local
+outputs/
+data/*.csv
+data/*.xlsx
+node_modules/
+.next/
+tests/
+.github/
+README.md
