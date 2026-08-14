@@ -1,0 +1,22 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+pandas==2.2.*
+numpy==1.26.*
+openpyxl==3.1.*
+langgraph==0.2.*
+openai==1.*                  # OpenAI-compatible client, pointed at OpenRouter's base URL
+python-telegram-bot==21.*
+reportlab==4.*
+matplotlib==3.9.*
+python-dotenv==1.*
+pydantic==2.*
+pydantic-settings==2.*
+
+# --- dev / CI ---
+ruff==0.7.*
+pytest==8.*
+
+# --- added in phase 2 (persistence) ---
+# sqlalchemy==2.*
+# psycopg2-binary==2.*
+# alembic==1.*
