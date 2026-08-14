@@ -1,0 +1,38 @@
+"""
+Centralized application settings.
+
+Every other module imports `settings` from here instead of calling
+os.getenv() directly. Required values are validated the moment this
+module is imported — if something's missing, the app fails immediately
+and loudly at startup, not three agents deep into a pipeline run.
+"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # --- LLM API (OpenRouter) ---
+    openrouter_api_key: str
+    default_model_fast: str = "anthropic/claude-haiku-4-5"
+    default_model_reasoning: str = "anthropic/claude-sonnet-5"
+
+    # --- Telegram ---
+    telegram_bot_token: str
+
+    # --- Email ---
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587       # STARTTLS — Gmail's standard secure SMTP port
+    email_address: str = ""
+    email_app_password: str = ""
+
+    # --- App ---
+    fibrion_env: str = "development"
+    log_level: str = "INFO"
+
+    # --- Pipeline behavior ---
+    verification_max_retries: int = 1
+
+
+settings = Settings()
