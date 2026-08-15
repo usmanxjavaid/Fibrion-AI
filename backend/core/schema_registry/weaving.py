@@ -1,8 +1,16 @@
 """
 backend/core/schema_registry/weaving.py
 
-Weaving's concrete implementation of ProcessModule - the first process
-type, and the one everything else in phase 1 is validated against.
+Weaving's concrete implementation of ProcessModule, built around the
+18 columns actually verified in the real Mendeley/Evince Textiles
+weaving dataset and its accompanying Data in Brief paper.
+
+Note on naming: the paper's own table and its formula text disagree on
+one field's name (assump_crimp% vs shrink_allow%), and the raw source
+data separately tracked loom_id/stoppage data that this particular
+cleaned dataset dropped. Different real weaving exports will look
+different from this one - that's handled by the ingestion mapping and
+unmapped-column preservation, not by pre-guessing every variant here.
 """
 
 import pandas as pd
@@ -19,76 +27,109 @@ class WeavingModule(ProcessModule):
     @property
     def required_fields(self) -> list[FieldSpec]:
         return [
-            FieldSpec("date", "date", True, "Production date for this record"),
-            FieldSpec("loom_id", "str", True, "Identifier for the specific loom"),
-            FieldSpec("order_id", "str", True, "Customer order or work order identifier"),
-            FieldSpec("fabric_construction", "str", False, "Weave spec, e.g. warp x weft count and density"),
-            FieldSpec("warp_count", "float", False, "Yarn count of the warp (lengthwise) threads"),
-            FieldSpec("weft_count", "float", False, "Yarn count of the weft (crosswise) threads"),
+            # --- core fields every fulfillment/rejection/shrinkage KPI needs ---
+            FieldSpec("order_id", "str", True,
+                      "Customer order identifier; multiple rows can share one order_id"),
+            FieldSpec("req_grey_fabric_yds", "float", True,
+                      "Required grey (unfinished, pre-shrinkage) fabric, in yards - "
+                      "the production target in the same units as actual output"),
+            FieldSpec("total_pdn_per_order_yds", "float", True,
+                      "Total grey fabric produced for this order, in yards"),
+            FieldSpec("rejection_yds", "float", True,
+                      "Fabric rejected/cut due to defects (damage, floating yarn, "
+                      "loose picks, pattern mismatch), in yards"),
+            FieldSpec("shrink_allow_pct", "float", True,
+                      "Planned/assumed shrinkage percent used when calculating "
+                      "required grey fabric and beam length"),
+            FieldSpec("act_shrink_pct", "float", True,
+                      "Actual measured shrinkage percent for this batch"),
+
+            # --- supporting / planning context, optional ---
+            FieldSpec("month", "str", False, "Production month"),
+            FieldSpec("fabric_construction", "str", False,
+                      "Weave spec string: warp count x weft count / EPI x PPI"),
+            FieldSpec("req_finish_fabric_yds", "float", False,
+                      "Finished fabric quantity the customer's order requires"),
+            FieldSpec("fabric_allowance_pct", "float", False,
+                      "Planning buffer percent for wastage/safety margin, "
+                      "separate from the shrinkage allowance"),
+            FieldSpec("rec_beam_length_yds", "float", False,
+                      "Beam length of warp yarn actually received/supplied, in yards"),
+            FieldSpec("req_beam_length_yds", "float", False,
+                      "Beam length of warp yarn the order requires, in yards"),
+            FieldSpec("previous_pdn_yds", "float", False,
+                      "Production carried forward from a previous shift",
+                      null_is_meaningful=True),
+            FieldSpec("total_pdn_today_yds", "float", False,
+                      "Production summed across this day's shifts",
+                      null_is_meaningful=True),
+            FieldSpec("warp_count", "str", False,
+                      "Warp yarn count - real data mixes plain numbers with "
+                      "construction notes like 'double_80', needs a parsing rule"),
+            FieldSpec("weft_count", "float", False, "Weft yarn count"),
             FieldSpec("epi", "float", False, "Ends per inch - warp thread density"),
             FieldSpec("ppi", "float", False, "Picks per inch - weft thread density"),
-            FieldSpec("production_qty_m", "float", True, "Fabric produced, in meters, for this record"),
-            FieldSpec("target_qty_m", "float", True, "Target/planned production, in meters"),
-            FieldSpec("rejection_qty_m", "float", True, "Fabric rejected as defective, in meters"),
-            FieldSpec("shift_duration_min", "float", True, "Total available production minutes for the shift"),
-            FieldSpec("stoppage_duration_min", "float", True, "Total loom downtime, in minutes, for this record"),
-            FieldSpec("stoppage_cause_raw", "str", False, "Operator's free-text reason the loom stopped"),
-            FieldSpec("shift", "str", False, "Production shift identifier"),
-            FieldSpec("operator_id", "str", False, "Operator identifier"),
         ]
 
     @property
     def stoppage_categories(self) -> list[str]:
+        # Not present as a column in this particular dataset - this defines
+        # the categories for *if* a future weaving source includes stoppage
+        # data, the way the original raw report (per the paper) did before
+        # this dataset's authors stripped it out.
         return ["mechanical", "electrical", "material", "other"]
 
     @property
     def domain_context(self) -> str:
         return (
-            "This data comes from a weaving shed. A loom interlaces warp "
-            "threads (lengthwise, held under tension) with weft threads "
-            "(crosswise, inserted by shuttle/rapier/airjet) to form fabric. "
-            "EPI (ends per inch) and PPI (picks per inch) describe thread "
-            "density. Loom stoppages are commonly caused by warp/weft "
-            "breaks, mechanical faults, electrical faults, or material "
-            "shortages. Efficiency compares actual production against the "
-            "loom's target output for the same period."
+            "This data tracks weaving orders from grey (unfinished, "
+            "pre-shrinkage) fabric production through to shrinkage during "
+            "finishing. Grey fabric quantity required is calculated from the "
+            "finished-fabric order plus a shrinkage allowance, since fabric "
+            "shrinks during dyeing/finishing after weaving. EPI (ends per "
+            "inch) and PPI (picks per inch) describe thread density; warp and "
+            "weft counts describe yarn thickness. Rejection covers fabric cut "
+            "out for defects such as broken picks, loose picks, or pattern "
+            "mismatch."
         )
 
     def compute_kpis(self, df: pd.DataFrame) -> dict:
-        by_loom = (
-            df.groupby("loom_id")
+        by_order = (
+            df.groupby("order_id")
             .agg(
-                production_m=("production_qty_m", "sum"),
-                target_m=("target_qty_m", "sum"),
-                rejection_m=("rejection_qty_m", "sum"),
-                downtime_min=("stoppage_duration_min", "sum"),
-                available_min=("shift_duration_min", "sum"),
+                produced_grey_yds=("total_pdn_per_order_yds", "sum"),
+                required_grey_yds=("req_grey_fabric_yds", "first"),
+                rejection_yds=("rejection_yds", "sum"),
+                avg_actual_shrink_pct=("act_shrink_pct", "mean"),
+                planned_shrink_pct=("shrink_allow_pct", "first"),
             )
             .reset_index()
         )
-        # Ratios computed from summed totals, not averaged from per-row
-        # percentages - a row producing 1000m must not count the same as
-        # a row producing 10m when the loom-level rate is derived.
-        by_loom["efficiency_pct"] = (by_loom["production_m"] / by_loom["target_m"] * 100).round(2)
-        by_loom["downtime_pct"] = (by_loom["downtime_min"] / by_loom["available_min"] * 100).round(2)
-        by_loom["rejection_pct"] = (by_loom["rejection_m"] / by_loom["production_m"] * 100).round(2)
+        by_order["fulfillment_pct"] = (
+            by_order["produced_grey_yds"] / by_order["required_grey_yds"] * 100
+        ).round(2)
+        by_order["rejection_pct"] = (
+            by_order["rejection_yds"] / by_order["produced_grey_yds"] * 100
+        ).round(2)
+        by_order["shrink_variance_pct"] = (
+            by_order["avg_actual_shrink_pct"] - by_order["planned_shrink_pct"]
+        ).round(2)
 
         overall = {
-            "total_production_m": float(df["production_qty_m"].sum()),
-            "total_target_m": float(df["target_qty_m"].sum()),
-            "overall_efficiency_pct": round(
-                df["production_qty_m"].sum() / df["target_qty_m"].sum() * 100, 2
-            ),
-            "total_downtime_min": float(df["stoppage_duration_min"].sum()),
-            "overall_downtime_pct": round(
-                df["stoppage_duration_min"].sum() / df["shift_duration_min"].sum() * 100, 2
+            "total_produced_grey_yds": float(df["total_pdn_per_order_yds"].sum()),
+            "total_required_grey_yds": float(df["req_grey_fabric_yds"].sum()),
+            "overall_fulfillment_pct": round(
+                df["total_pdn_per_order_yds"].sum() / df["req_grey_fabric_yds"].sum() * 100, 2
             ),
             "overall_rejection_pct": round(
-                df["rejection_qty_m"].sum() / df["production_qty_m"].sum() * 100, 2
+                df["rejection_yds"].sum() / df["total_pdn_per_order_yds"].sum() * 100, 2
+            ),
+            "avg_shrink_variance_pct": round(
+                (df["act_shrink_pct"] - df["shrink_allow_pct"]).mean(), 2
             ),
         }
 
-        return {"overall": overall, "by_loom": by_loom.to_dict(orient="records")}
+        return {"overall": overall, "by_order": by_order.to_dict(orient="records")}
 
 
 weaving_module = register_module(WeavingModule())
