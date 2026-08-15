@@ -6,8 +6,29 @@ The contract every textile production process must implement.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Callable, Literal, Optional
 
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class DerivationRule:
+    """How to obtain a field's value when it isn't present as a direct
+    column in the source file, but the inputs needed to compute it are.
+
+    Two methods:
+    - "formula": deterministic code, e.g. the shrinkage-allowance math
+      this dataset's own creators used. No LLM, exact answer.
+    - "llm_parse": for compound/text fields where there's no fixed
+      formula - e.g. splitting a construction string like
+      "40x40/110x80" into warp_count/weft_count/epi/ppi. The exact
+      format varies enough between mills that one hardcoded parser
+      would be as brittle as hardcoding one column name.
+    """
+    source_fields: list[str]          # canonical fields this depends on
+    method: Literal["formula", "llm_parse"]
+    formula: Optional[Callable[[dict], float]] = None
+    parse_instruction: Optional[str] = None   # only for method="llm_parse"
 
 
 @dataclass(frozen=True)
@@ -17,19 +38,15 @@ class FieldSpec:
     dtype: str
     required: bool
     description: str
-
-    # If True, a missing value in this field is a legitimate real-world
-    # state (e.g. a loom idle after its order was already fulfilled),
-    # not a data-quality problem - the Validation Agent must not flag
-    # it as an error just because it's blank.
     null_is_meaningful: bool = False
-
-    # Fraction of a column's distinct values that a proposed cleaning
-    # rule must correctly parse before the Verifier auto-approves it
-    # without a flag. Below this, the rule still applies (pipeline
-    # doesn't stop) but the field is marked low-confidence in the
-    # final report.
     coverage_threshold: float = 0.98
+
+    # If set, this field can be computed from other already-resolved
+    # fields when it isn't present directly in the source file. A
+    # required field with a derivation rule is satisfied by EITHER
+    # a direct mapping OR successful derivation - only truly missing
+    # if neither path works.
+    derivation: Optional[DerivationRule] = None
 
 
 class ProcessModule(ABC):
