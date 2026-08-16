@@ -34,5 +34,19 @@ class Settings(BaseSettings):
     # --- Pipeline behavior ---
     verification_max_retries: int = 1
 
+    # --- Observability (optional - tracing only activates if enabled) ---
+    langsmith_tracing: bool = False
+    langsmith_api_key: str = ""
+    langsmith_project: str = "fibrion"
+
 
 settings = Settings()
+
+# LangChain's own tracing reads these as real OS environment variables,
+# not from our settings object - this is the one place that translation
+# happens, so every other file can just import `settings` normally.
+if settings.langsmith_tracing:
+    import os
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
+    os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project

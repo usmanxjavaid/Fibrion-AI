@@ -11,6 +11,8 @@ matplotlib==3.9.*
 python-dotenv==1.*
 pydantic==2.*
 pydantic-settings==2.*
+langchain-openai==0.2.*
+langsmith==0.4.*
 
 # --- dev / CI ---
 ruff==0.7.*
