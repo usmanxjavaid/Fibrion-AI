@@ -13,10 +13,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # --- LLM API (OpenRouter) ---
+    # --- LLM API ---
     openrouter_api_key: str
     default_model_fast: str = "anthropic/claude-haiku-4-5"
     default_model_reasoning: str = "anthropic/claude-sonnet-5"
+
+    groq_api_key: str = ""
 
     # --- Telegram ---
     telegram_bot_token: str
