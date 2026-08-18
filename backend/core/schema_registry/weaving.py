@@ -59,16 +59,28 @@ class WeavingModule(ProcessModule):
                       null_is_meaningful=True),
             FieldSpec("warp_count", "str", False, "Warp yarn count",
                       derivation=DerivationRule(source_fields=["fabric_construction"],
-                          method="llm_parse", parse_instruction="Extract warp count.")),
+                          method="llm_parse", parse_instruction=(
+                              "Format is warp x weft / EPI x PPI, e.g. '40x40/110x80' means "
+                              "warp=40, weft=40, EPI=110, PPI=80. Extract ONLY the first number, "
+                              "before the first 'x' - e.g. 40 from '40x40/110x80'."))),
             FieldSpec("weft_count", "float", False, "Weft yarn count",
                       derivation=DerivationRule(source_fields=["fabric_construction"],
-                          method="llm_parse", parse_instruction="Extract weft count.")),
+                          method="llm_parse", parse_instruction=(
+                              "Format is warp x weft / EPI x PPI, e.g. '40x40/110x80' means "
+                              "warp=40, weft=40, EPI=110, PPI=80. Extract the second number, "
+                              "between the first 'x' and the '/' - e.g. 40 from '40x40/110x80'."))),
             FieldSpec("epi", "float", False, "Ends per inch",
                       derivation=DerivationRule(source_fields=["fabric_construction"],
-                          method="llm_parse", parse_instruction="Extract EPI.")),
+                          method="llm_parse", parse_instruction=(
+                              "Format is warp x weft / EPI x PPI, e.g. '40x40/110x80' means "
+                              "warp=40, weft=40, EPI=110, PPI=80. Extract the first number after "
+                              "the '/' - e.g. 110 from '40x40/110x80'."))),
             FieldSpec("ppi", "float", False, "Picks per inch",
                       derivation=DerivationRule(source_fields=["fabric_construction"],
-                          method="llm_parse", parse_instruction="Extract PPI.")),
+                          method="llm_parse", parse_instruction=(
+                              "Format is warp x weft / EPI x PPI, e.g. '40x40/110x80' means "
+                              "warp=40, weft=40, EPI=110, PPI=80. Extract the last number, "
+                              "after the second 'x' - e.g. 80 from '40x40/110x80'."))),
 
             # --- standard mill fields NOT in this dataset, but common
             # enough across real weaving sheds to be worth defining now.

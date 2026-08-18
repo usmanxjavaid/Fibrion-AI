@@ -21,11 +21,17 @@ out/
 frontend/.env*.local
 
 # --- Data & generated output ---
-data/*.csv
-data/*.xlsx
-outputs/reports/*.pdf
-!data/sample_weaving/.gitkeep
-!outputs/reports/.gitkeep
+# Never commit real production data, generated reports, or per-run
+# temp artifacts. The leading **/ matters: these folders live under
+# backend/, not at the repo root where this .gitignore sits, and a
+# pattern with a slash in the middle (like "data/**/*.csv") only
+# matches a data/ folder AT the .gitignore's own location without it.
+**/data/**/*.csv
+**/data/**/*.xlsx
+**/outputs/reports/*.pdf
+**/outputs/tmp/
+!**/data/sample_weaving/.gitkeep
+!**/outputs/reports/.gitkeep
 
 # --- OS / editor ---
 .DS_Store

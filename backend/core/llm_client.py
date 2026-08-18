@@ -21,7 +21,9 @@ logger = get_agent_logger("llm_client")
 
 T = TypeVar("T", bound=BaseModel)
 ModelTier = Literal["fast", "reasoning"]
-Provider = Literal["openrouter", "groq"]
+Provider = Literal["openrouter", "gemini", "groq"]
+
+
 
 _PROVIDERS = {
     "openrouter": {
@@ -37,6 +39,7 @@ _PROVIDERS = {
 }
 
 
+
 def get_llm(tier: ModelTier, provider: Provider = "openrouter",
             temperature: float = 0.0, max_tokens: int = 1024) -> ChatOpenAI:
     cfg = _PROVIDERS[provider]
@@ -45,9 +48,9 @@ def get_llm(tier: ModelTier, provider: Provider = "openrouter",
         temperature=temperature, max_tokens=max_tokens,
     )
 
+_NON_RETRYABLE_STATUS_CODES = {401, 402, 403}
 
-def _try_provider(provider: Provider, tier: ModelTier, prompt: str,
-                   output_schema: Type[T], max_retries: int, max_tokens: int):
+def _try_provider(provider, tier, prompt, output_schema, max_retries, max_tokens):
     llm = get_llm(tier, provider=provider, max_tokens=max_tokens).with_structured_output(
         output_schema, include_raw=True
     )
@@ -60,6 +63,9 @@ def _try_provider(provider: Provider, tier: ModelTier, prompt: str,
             response = llm.invoke(attempt_prompt)
         except Exception as e:
             last_error = str(e)
+            if getattr(e, "status_code", None) in _NON_RETRYABLE_STATUS_CODES:
+                logger.warning(f"[{provider}] non-retryable ({e.status_code}), skipping remaining retries: {last_error}")
+                break
             logger.warning(f"[{provider}] raised on attempt {attempt + 1}: {last_error}")
             attempt_prompt = f"{prompt}\n\nPrevious error: {last_error}\nRespond again, matching the required format."
             continue
@@ -84,6 +90,8 @@ def _try_provider(provider: Provider, tier: ModelTier, prompt: str,
                    "failed": True, "error": str(last_error)}
 
 
+_FALLBACK_ORDER = ["gemini", "groq"]
+
 def call_structured(
     tier: ModelTier, prompt: str, output_schema: Type[T],
     max_retries: int = 1, max_tokens: int = 1024, use_fallback: bool = True,
@@ -92,12 +100,18 @@ def call_structured(
     if parsed is not None:
         return parsed, metadata
 
-    if use_fallback and settings.groq_api_key:
-        logger.warning(f"OpenRouter exhausted, trying Groq fallback: {metadata.get('error')}")
-        parsed, fb_metadata = _try_provider("groq", tier, prompt, output_schema, max_retries, max_tokens)
+    if not use_fallback:
+        return None, metadata
+
+    errors = {"openrouter": metadata}
+    for provider in _FALLBACK_ORDER:
+        if not _PROVIDERS[provider]["api_key"]:
+            continue
+        logger.warning(f"Trying {provider} after prior failures: {list(errors.keys())}")
+        parsed, fb_metadata = _try_provider(provider, tier, prompt, output_schema, max_retries, max_tokens)
         if parsed is not None:
             return parsed, fb_metadata
-        logger.error(f"Both providers failed. OpenRouter: {metadata.get('error')} | Groq: {fb_metadata.get('error')}")
-        return None, {"primary_error": metadata, "fallback_error": fb_metadata}
+        errors[provider] = fb_metadata
 
-    return None, metadata
+    logger.error(f"All providers failed: {errors}")
+    return None, {"errors": errors}

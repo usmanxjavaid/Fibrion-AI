@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     default_model_fast: str = "anthropic/claude-haiku-4-5"
     default_model_reasoning: str = "anthropic/claude-sonnet-5"
-
+    gemini_api_key: str = ""
     groq_api_key: str = ""
 
     # --- Telegram ---
