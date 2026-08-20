@@ -15,10 +15,13 @@ class Settings(BaseSettings):
 
     # --- LLM API ---
     openrouter_api_key: str
-    default_model_fast: str = "anthropic/claude-haiku-4-5"
+    # default_model_fast: str = "anthropic/claude-haiku-4-5"
+    default_model_fast: str = "nvidia/nemotron-3-super-120b-a12b:free"
     default_model_reasoning: str = "anthropic/claude-sonnet-5"
-    gemini_api_key: str = ""
     groq_api_key: str = ""
+    gemini_api_key: str = ""
+    cerebras_api_key: str = ""
+    
 
     # --- Telegram ---
     telegram_bot_token: str

@@ -14,7 +14,7 @@ resolution attempt - that's reported via state.error, not an exception.
 
 from pathlib import Path
 from typing import Optional
-
+import difflib
 import pandas as pd
 from pydantic import BaseModel, Field, create_model
 
@@ -57,6 +57,14 @@ def _build_mapping_prompt(df: pd.DataFrame, module, data_dictionary: Optional[st
         f"Canonical fields to map to:\n{field_list}"
     )
 
+import re
+
+def _normalize_col_name(name: str) -> str:
+    """Strips everything but letters/digits and lowercases - for
+    recovering a mapping when the LLM dropped punctuation (%, /, (), _)
+    from a raw column name while generating its JSON response, a
+    reproducible pattern rather than a one-off mistake."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 def _resolve_formula_derivations(df, module, field_resolutions):
     pending = [
@@ -147,6 +155,18 @@ def _resolve_llm_parse_derivations(df, module, field_resolutions):
 
     return df
 
+def _fuzzy_find_column(target_name: str, candidates: list[str], threshold: float = 0.6) -> Optional[str]:
+    """Last-resort recovery for a still-missing required field, tried
+    only after exact and normalized matching both fail. Deliberately
+    the least-trusted of the three recovery tiers - callers should mark
+    anything recovered this way with reduced confidence."""
+    normalized_target = _normalize_col_name(target_name)
+    best_match, best_score = None, 0.0
+    for col in candidates:
+        score = difflib.SequenceMatcher(None, normalized_target, _normalize_col_name(col)).ratio()
+        if score > best_score:
+            best_match, best_score = col, score
+    return best_match if best_score >= threshold else None
 
 def run_ingestion(state: FibrionState) -> dict:
     run_id_ctx.set(state.run_id)
@@ -163,7 +183,7 @@ def run_ingestion(state: FibrionState) -> dict:
     prompt = _build_mapping_prompt(df, module, state.data_dictionary)
     mapping_result, meta = call_structured(
         tier="fast", prompt=prompt, output_schema=ColumnMapping,
-        max_tokens=min(4096, 300 + len(df.columns) * 30),
+        max_tokens=min(4096, 500 + len(df.columns) * 80),
     )
     if mapping_result is None:
         logger.error(f"Column mapping call failed: {meta}")
@@ -171,15 +191,24 @@ def run_ingestion(state: FibrionState) -> dict:
 
     column_mapping_raw = mapping_result.mappings
     valid_field_names = {f.name for f in module.required_fields}
-    column_mapping = {}
-    invalid_targets = []
+    real_columns = set(df.columns)
+    normalized_to_real = {_normalize_col_name(c): c for c in real_columns}
+    column_mapping, invalid_targets, hallucinated_sources = {}, [], []
+
     for raw_col, canonical in column_mapping_raw.items():
-        if canonical in valid_field_names:
-            column_mapping[raw_col] = canonical
+        target_col = raw_col if raw_col in real_columns else normalized_to_real.get(_normalize_col_name(raw_col))
+        if target_col is None:
+            hallucinated_sources.append((raw_col, canonical))
+        elif canonical in valid_field_names:
+            if target_col != raw_col:
+                logger.info(f"Recovered mapping via normalized match: '{raw_col}' -> real column '{target_col}' -> '{canonical}'")
+            column_mapping[target_col] = canonical
         else:
             invalid_targets.append((raw_col, canonical))
     if invalid_targets:
         logger.warning(f"LLM proposed unknown canonical targets, treating as unmapped: {invalid_targets}")
+    if hallucinated_sources:
+        logger.warning(f"LLM proposed mappings with no matching real column, even after normalization: {hallucinated_sources}")
 
     unmapped_columns = [c for c in df.columns if c not in column_mapping]
     df = df.rename(columns=column_mapping)
@@ -189,9 +218,20 @@ def run_ingestion(state: FibrionState) -> dict:
         for raw, canonical in column_mapping.items()
     }
 
+    # Preserve non-numeric values in float fields before coercion wipes
+    # them out - this dataset uses the literal string "TOTAL" in
+    # previous_pdn_yds to flag periodic order-level checkpoint rows,
+    # found by inspecting the real data directly. A blind coercion
+    # would silently turn that into an ordinary NaN.
     for field in module.required_fields:
         if field.name in df.columns and field.dtype == "float":
-            df[field.name] = pd.to_numeric(df[field.name], errors="coerce")
+            numeric = pd.to_numeric(df[field.name], errors="coerce")
+            non_numeric_mask = numeric.isna() & df[field.name].notna()
+            if non_numeric_mask.any():
+                marker_col = f"_{field.name}_marker"
+                df[marker_col] = df[field.name].where(non_numeric_mask)
+                logger.info(f"Preserved {int(non_numeric_mask.sum())} non-numeric marker values from '{field.name}' in '{marker_col}'")
+            df[field.name] = numeric
 
     df = _resolve_formula_derivations(df, module, field_resolutions)
     df = _resolve_llm_parse_derivations(df, module, field_resolutions)
@@ -200,14 +240,34 @@ def run_ingestion(state: FibrionState) -> dict:
         f.name for f in module.required_fields
         if f.required and (f.name not in df.columns or df[f.name].isna().all())
     ]
+
     if missing_required:
-        logger.error(f"Required fields unsatisfied after mapping and derivation: {missing_required}")
-        return {
-            "column_mapping": column_mapping,
-            "unmapped_columns": unmapped_columns,
-            "field_resolutions": field_resolutions,
-            "error": {"type": "ingestion_missing_required_fields", "missing_fields": missing_required},
-        }
+        still_missing = []
+        used_as_source = set(column_mapping.keys())
+        for field_name in missing_required:
+            field_spec = next(f for f in module.required_fields if f.name == field_name)
+            candidates = [c for c in unmapped_columns if c not in used_as_source]
+            match = _fuzzy_find_column(field_name, candidates)
+            if not match:
+                still_missing.append(field_name)
+                continue
+
+            df = df.rename(columns={match: field_name})
+            if field_spec.dtype == "float":
+                numeric = pd.to_numeric(df[field_name], errors="coerce")
+                non_numeric_mask = numeric.isna() & df[field_name].notna()
+                if non_numeric_mask.any():
+                    df[f"_{field_name}_marker"] = df[field_name].where(non_numeric_mask)
+                df[field_name] = numeric
+
+            field_resolutions[field_name] = FieldResolution(
+                source="direct_mapping", confidence=0.6, raw_column_name=match,
+            )
+            column_mapping[match] = field_name
+            unmapped_columns.remove(match)
+            logger.info(f"Fuzzy-recovered '{field_name}' from unmapped column '{match}' (last resort, confidence=0.6)")
+
+        missing_required = still_missing
 
     out_dir = Path("outputs/tmp")
     out_dir.mkdir(parents=True, exist_ok=True)

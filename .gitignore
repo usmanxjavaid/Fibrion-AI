@@ -30,7 +30,8 @@ frontend/.env*.local
 **/data/**/*.xlsx
 **/outputs/reports/*.pdf
 **/outputs/tmp/
-!**/data/sample_weaving/.gitkeep
+!**/data/raw/.gitkeep
+!**/data/test/.gitkeep
 !**/outputs/reports/.gitkeep
 
 # --- OS / editor ---

@@ -21,7 +21,7 @@ logger = get_agent_logger("llm_client")
 
 T = TypeVar("T", bound=BaseModel)
 ModelTier = Literal["fast", "reasoning"]
-Provider = Literal["openrouter", "gemini", "groq"]
+Provider = Literal["openrouter", "gemini", "groq", "cerebras"]
 
 
 
@@ -32,12 +32,21 @@ _PROVIDERS = {
         "models": {"fast": settings.default_model_fast, "reasoning": settings.default_model_reasoning},
     },
     "groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key": settings.groq_api_key,
-        "models": {"fast": "openai/gpt-oss-20b", "reasoning": "openai/gpt-oss-120b"},
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key": settings.groq_api_key,
+            "models": {"fast": "openai/gpt-oss-20b", "reasoning": "openai/gpt-oss-120b"},
+        },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key": settings.gemini_api_key,
+        "models": {"fast": "gemini-3.5-flash-lite", "reasoning": "gemini-3.5-flash"},
     },
+        "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "api_key": settings.cerebras_api_key,
+        "models": {"fast": "llama-4-scout", "reasoning": "gpt-oss-120b"},
+    }, 
 }
-
 
 
 def get_llm(tier: ModelTier, provider: Provider = "openrouter",
@@ -90,28 +99,25 @@ def _try_provider(provider, tier, prompt, output_schema, max_retries, max_tokens
                    "failed": True, "error": str(last_error)}
 
 
-_FALLBACK_ORDER = ["gemini", "groq"]
+_PROVIDER_ORDER = ["groq", "openrouter", "gemini", "cerebras"]
 
 def call_structured(
     tier: ModelTier, prompt: str, output_schema: Type[T],
     max_retries: int = 1, max_tokens: int = 1024, use_fallback: bool = True,
 ) -> tuple[Optional[T], dict]:
-    parsed, metadata = _try_provider("openrouter", tier, prompt, output_schema, max_retries, max_tokens)
-    if parsed is not None:
-        return parsed, metadata
-
-    if not use_fallback:
-        return None, metadata
-
-    errors = {"openrouter": metadata}
-    for provider in _FALLBACK_ORDER:
+    providers_to_try = _PROVIDER_ORDER if use_fallback else _PROVIDER_ORDER[:1]
+    errors = {}
+    for provider in providers_to_try:
         if not _PROVIDERS[provider]["api_key"]:
             continue
-        logger.warning(f"Trying {provider} after prior failures: {list(errors.keys())}")
-        parsed, fb_metadata = _try_provider(provider, tier, prompt, output_schema, max_retries, max_tokens)
+        if errors:
+            logger.warning(f"Trying {provider} after prior failures: {list(errors.keys())}")
+        parsed, metadata = _try_provider(provider, tier, prompt, output_schema, max_retries, max_tokens)
         if parsed is not None:
-            return parsed, fb_metadata
-        errors[provider] = fb_metadata
+            return parsed, metadata
+        errors[provider] = metadata
 
+    if not errors:
+        return None, {"error": "no providers configured with an API key"}
     logger.error(f"All providers failed: {errors}")
     return None, {"errors": errors}

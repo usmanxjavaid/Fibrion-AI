@@ -95,6 +95,9 @@ def _classify_stoppages(df: pd.DataFrame, module) -> tuple[pd.DataFrame, Optiona
 
 def run_validation(state: FibrionState) -> dict:
     run_id_ctx.set(state.run_id)
+    if state.error or not state.cleaned_data_path:
+        logger.warning("Skipping KPI computation - no cleaned data available")
+        return {}  
     module = get_process_module(state.process_type)
     df = pd.read_parquet(state.cleaned_data_path)
 
@@ -104,7 +107,11 @@ def run_validation(state: FibrionState) -> dict:
     df, classification_error = _classify_stoppages(df, module)
 
     critical_fields = [n for n, d in impossible_values.items() if d["fraction"] > CRITICAL_THRESHOLD]
-    critical_duplicates = duplicate_issues.get("fraction", 0) > CRITICAL_THRESHOLD
+    # Duplicate rows are NOT treated as critical - daily production
+    # reports commonly forward-fill "unchanged since last entry" rows
+    # (confirmed for this dataset by its own source paper), producing
+    # large numbers of genuinely duplicate rows as an expected trait,
+    # not corruption. Still recorded in the report, just not gating.
 
     validation_report = {
         "row_count": len(df), "impossible_values": impossible_values,
@@ -112,12 +119,11 @@ def run_validation(state: FibrionState) -> dict:
         "stoppage_classification_error": classification_error,
     }
 
-    if critical_fields or critical_duplicates:
-        logger.error(f"Critical validation failure: bad_fields={critical_fields}, duplicates_critical={critical_duplicates}")
+    if critical_fields:
+        logger.error(f"Critical validation failure: bad_fields={critical_fields}")
         return {
             "validation_report": validation_report,
-            "error": {"type": "validation_critical_failure", "bad_fields": critical_fields,
-                       "duplicates_critical": critical_duplicates},
+            "error": {"type": "validation_critical_failure", "bad_fields": critical_fields},
         }
 
     df.to_parquet(state.cleaned_data_path)  # overwrite - may now include stoppage_cause_category

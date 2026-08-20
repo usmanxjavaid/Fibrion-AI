@@ -125,56 +125,65 @@ class WeavingModule(ProcessModule):
         )
 
     def compute_kpis(self, df: pd.DataFrame) -> dict:
-        by_order = (
-            df.groupby("order_id")
-            .agg(
-                produced_grey_yds=("total_pdn_per_order_yds", "sum"),
-                required_grey_yds=("req_grey_fabric_yds", "first"),
+        # produced/required come from periodic order-level checkpoint
+        # rows, not summed/first'd across all rows - most fields repeat
+        # across many rows per order, and naive aggregation either
+        # double-counts or picks up a stale value. Falls back to a
+        # whole-file sum/first if the marker isn't present.
+        if "_previous_pdn_yds_marker" in df.columns:
+            checkpoints = df[df["_previous_pdn_yds_marker"] == "TOTAL"]
+            produced = checkpoints.groupby("order_id")["total_pdn_per_order_yds"].max()
+            # .last(), not .first() - req_grey_fabric_yds can genuinely
+            # change mid-order (an amendment), and the most recent value
+            # is the one that actually applied to most of the order.
+            required = checkpoints.groupby("order_id")["req_grey_fabric_yds"].last()
+        else:
+            produced = df.groupby("order_id")["total_pdn_per_order_yds"].sum()
+            required = df.groupby("order_id")["req_grey_fabric_yds"].first()
+
+        by_order = pd.DataFrame({
+            "produced_grey_yds": produced,
+            "required_grey_yds": required,
+        }).join(
+            df.groupby("order_id").agg(
                 rejection_yds=("rejection_yds", "sum"),
                 avg_actual_shrink_pct=("act_shrink_pct", "mean"),
                 planned_shrink_pct=("shrink_allow_pct", "first"),
             )
-            .reset_index()
-        )
-        by_order["fulfillment_pct"] = (
-            by_order["produced_grey_yds"] / by_order["required_grey_yds"] * 100).round(2)
-        by_order["rejection_pct"] = (
-            by_order["rejection_yds"] / by_order["produced_grey_yds"] * 100).round(2)
-        by_order["shrink_variance_pct"] = (
-            by_order["avg_actual_shrink_pct"] - by_order["planned_shrink_pct"]).round(2)
+        ).reset_index()
 
+        by_order["fulfillment_pct"] = (
+            by_order["produced_grey_yds"] / by_order["required_grey_yds"] * 100
+        ).round(2)
+        by_order["rejection_pct"] = (
+            by_order["rejection_yds"] / by_order["produced_grey_yds"] * 100
+        ).round(2)
+        by_order["shrink_variance_pct"] = (
+            by_order["avg_actual_shrink_pct"] - by_order["planned_shrink_pct"]
+        ).round(2)
+        # Any single-letter parenthesized suffix - (A), (B), etc. -
+        # confirmed as the same supplementary-order pattern under
+        # different revision letters, not hardcoded to just (A).
+        by_order["is_supplementary"] = by_order["order_id"].str.contains(r"\([A-Z]\)", regex=True)
+
+        # overall is derived from by_order, not recomputed from raw
+        # rows - one source of truth, and it's what was actually wrong
+        # last time. Supplementary orders excluded here too, same as
+        # from anomaly detection.
+        primary = by_order[~by_order["is_supplementary"]]
         overall = {
-            "total_produced_grey_yds": float(df["total_pdn_per_order_yds"].sum()),
-            "total_required_grey_yds": float(df["req_grey_fabric_yds"].sum()),
+            "total_produced_grey_yds": float(primary["produced_grey_yds"].sum()),
+            "total_required_grey_yds": float(primary["required_grey_yds"].sum()),
             "overall_fulfillment_pct": round(
-                df["total_pdn_per_order_yds"].sum() / df["req_grey_fabric_yds"].sum() * 100, 2),
+                primary["produced_grey_yds"].sum() / primary["required_grey_yds"].sum() * 100, 2
+            ),
             "overall_rejection_pct": round(
-                df["rejection_yds"].sum() / df["total_pdn_per_order_yds"].sum() * 100, 2),
-            "avg_shrink_variance_pct": round(
-                (df["act_shrink_pct"] - df["shrink_allow_pct"]).mean(), 2),
+                primary["rejection_yds"].sum() / primary["produced_grey_yds"].sum() * 100, 2
+            ),
+            "avg_shrink_variance_pct": round(primary["shrink_variance_pct"].mean(), 2),
         }
 
-        result = {"overall": overall, "by_order": by_order.to_dict(orient="records")}
-
-        # --- graceful use of optional fields: only computed if present ---
-        if "loom_id" in df.columns and "stoppage_duration_min" in df.columns \
-                and "shift_duration_min" in df.columns:
-            by_loom = (
-                df.groupby("loom_id")
-                .agg(downtime_min=("stoppage_duration_min", "sum"),
-                     available_min=("shift_duration_min", "sum"))
-                .reset_index()
-            )
-            by_loom["downtime_pct"] = (
-                by_loom["downtime_min"] / by_loom["available_min"] * 100).round(2)
-            result["by_loom"] = by_loom.to_dict(orient="records")
-
-        if "defect_type" in df.columns:
-            result["defect_breakdown"] = (
-                df["defect_type"].value_counts().to_dict()
-            )
-
-        return result
+        return {"overall": overall, "by_order": by_order.to_dict(orient="records")}
 
 
 weaving_module = register_module(WeavingModule())
