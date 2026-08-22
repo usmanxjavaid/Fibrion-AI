@@ -28,7 +28,7 @@ frontend/.env*.local
 # matches a data/ folder AT the .gitignore's own location without it.
 **/data/**/*.csv
 **/data/**/*.xlsx
-**/outputs/reports/*.pdf
+**/outputs/reports/**
 **/outputs/tmp/
 !**/data/raw/.gitkeep
 !**/data/test/.gitkeep

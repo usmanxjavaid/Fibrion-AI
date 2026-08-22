@@ -125,33 +125,29 @@ class WeavingModule(ProcessModule):
         )
 
     def compute_kpis(self, df: pd.DataFrame) -> dict:
-        # produced/required come from periodic order-level checkpoint
-        # rows, not summed/first'd across all rows - most fields repeat
-        # across many rows per order, and naive aggregation either
-        # double-counts or picks up a stale value. Falls back to a
-        # whole-file sum/first if the marker isn't present.
         if "_previous_pdn_yds_marker" in df.columns:
             checkpoints = df[df["_previous_pdn_yds_marker"] == "TOTAL"]
             produced = checkpoints.groupby("order_id")["total_pdn_per_order_yds"].max()
-            # .last(), not .first() - req_grey_fabric_yds can genuinely
-            # change mid-order (an amendment), and the most recent value
-            # is the one that actually applied to most of the order.
+            # rejection_yds shows the same cumulative-checkpoint signature
+            # as production, confirmed by discovery_agent - max, not sum.
+            rejection = checkpoints.groupby("order_id")["rejection_yds"].max()
             required = checkpoints.groupby("order_id")["req_grey_fabric_yds"].last()
         else:
             produced = df.groupby("order_id")["total_pdn_per_order_yds"].sum()
+            rejection = df.groupby("order_id")["rejection_yds"].sum()
             required = df.groupby("order_id")["req_grey_fabric_yds"].first()
 
         by_order = pd.DataFrame({
             "produced_grey_yds": produced,
+            "rejection_yds": rejection,
             "required_grey_yds": required,
         }).join(
             df.groupby("order_id").agg(
-                rejection_yds=("rejection_yds", "sum"),
                 avg_actual_shrink_pct=("act_shrink_pct", "mean"),
                 planned_shrink_pct=("shrink_allow_pct", "first"),
+                fabric_construction=("fabric_construction", "first"),
             )
         ).reset_index()
-
         by_order["fulfillment_pct"] = (
             by_order["produced_grey_yds"] / by_order["required_grey_yds"] * 100
         ).round(2)
@@ -164,13 +160,19 @@ class WeavingModule(ProcessModule):
         # Any single-letter parenthesized suffix - (A), (B), etc. -
         # confirmed as the same supplementary-order pattern under
         # different revision letters, not hardcoded to just (A).
+
         by_order["is_supplementary"] = by_order["order_id"].str.contains(r"\([A-Z]\)", regex=True)
+        # Some IDs ("Beam", "Exc-Beam", "Exces Beam") aren't customer
+        # orders at all - excess warp material woven off without a
+        # specific order attached, confirmed directly against the real
+        # data. General rule: a real order ID always contains a digit.
+        by_order["is_non_order_material"] = ~by_order["order_id"].str.contains(r"\d", regex=True)
 
         # overall is derived from by_order, not recomputed from raw
         # rows - one source of truth, and it's what was actually wrong
         # last time. Supplementary orders excluded here too, same as
         # from anomaly detection.
-        primary = by_order[~by_order["is_supplementary"]]
+        primary = by_order[~by_order["is_supplementary"] & ~by_order["is_non_order_material"]]
         overall = {
             "total_produced_grey_yds": float(primary["produced_grey_yds"].sum()),
             "total_required_grey_yds": float(primary["required_grey_yds"].sum()),
@@ -183,7 +185,20 @@ class WeavingModule(ProcessModule):
             "avg_shrink_variance_pct": round(primary["shrink_variance_pct"].mean(), 2),
         }
 
-        return {"overall": overall, "by_order": by_order.to_dict(orient="records")}
+        excluded_order_ids = []
+        if "_previous_pdn_yds_marker" in df.columns:
+            all_orders = set(df["order_id"].unique())
+            covered_orders = set(by_order["order_id"])
+            excluded_order_ids = sorted(all_orders - covered_orders)
 
+        return {
+            "overall": overall,
+            "by_order": by_order.to_dict(orient="records"),
+            "excluded_orders": {
+                "count": len(excluded_order_ids),
+                "reason": "no checkpoint row found - produced/rejection cannot be determined",
+                "order_ids": excluded_order_ids,
+            },
+        }
 
 weaving_module = register_module(WeavingModule())

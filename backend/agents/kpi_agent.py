@@ -64,7 +64,8 @@ def run_kpi(state: FibrionState) -> dict:
 
     anomalies = []
     if "by_order" in kpi_results:
-        primary_orders = [o for o in kpi_results["by_order"] if not o.get("is_supplementary")]
+        primary_orders = [o for o in kpi_results["by_order"]
+                            if not o.get("is_supplementary") and not o.get("is_non_order_material")]
         anomalies += _detect_anomalies(primary_orders, "order_id")
     if "by_loom" in kpi_results:
         anomalies += _detect_anomalies(kpi_results["by_loom"], "loom_id")
